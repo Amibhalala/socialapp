@@ -19,11 +19,9 @@ const ip = req?.socket?.remoteAddress;
 
 export const cacheRequest = (req: Request, res: Response, next:NextFunction) => {
         const { id } = req.params;
-        console.log('888',req.params)
         redis.get(id, (error, result) => {
           if (error) throw error;
           if (result !== null) {
-            console.log('here89',result)
             return res.json(JSON.parse(result));
           } else {
             return next();
