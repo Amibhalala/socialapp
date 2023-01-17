@@ -3,15 +3,28 @@ import { IPost } from "../../types/post";
 import Post from "../../models/post";
 import { IComment } from "../../types/comment";
 import Comment from "../../models/comment";
+import { validateAccess } from "../../utility/commonFunction";
+export const getCustomFilter= (query:any) =>{
+  let match:any={};
+  const {title,text}=query;
+  if(title){
+  match['title'] = { '$regex' : title, '$options' : 'i' }
+  }
+  if(text){
+    match['text'] = { '$regex' : text, '$options' : 'i' }
+  }
+  return match;
+};
 export const getAllPost = async (req: Request, res: Response): Promise<void> => {
   try {
     const query = req?.query;
+    const match=getCustomFilter(query);
     const pageOptions = {
       page : query?.page ? parseInt(query?.page) : 0,
       limit : query?.limit ? parseInt(query?.limit) : 0
     }
-    const posts: IPost[] = await Post.find({}).limit(pageOptions.limit).skip(pageOptions.page * pageOptions.limit).sort({createdAt:-1});
-    res.status(200).json({ posts })
+    const posts: IPost[] = await Post.find({...match}).limit(pageOptions.limit).skip(pageOptions.page * pageOptions.limit).sort({createdAt:-1});
+    res.status(200).json({ posts,page:query?.page,limit:query?.limit })
   } catch (error) {
     res.status(400).json({
       error: "404 posts are not found",
@@ -79,11 +92,13 @@ export const updatePost = async (req: Request, res: Response): Promise<void> => 
         params: { id },
         body,
       } = req
+      const userId=req?.user?.id;
       const updatePost: IPost | null = await Post.findByIdAndUpdate(
         { _id: id },
         body,
         {new: true}
-      )
+        )
+      validateAccess(userId,updatePost?.createdBy.toString(),res)
       const allPost: IPost[] = await Post.find()
       res.status(200).json({
         message: "Post updated",
@@ -103,12 +118,21 @@ export const deletePost = async (req: Request, res: Response): Promise<void> => 
       const deletedPost: IPost | null = await Post.findByIdAndRemove(
         req.params.id
       )
-      const allPost: IPost[] = await Post.find()
-      res.status(200).json({
-        message: "Post deleted",
-        post: deletedPost,
-        posts: allPost,
-      })
+      if(deletedPost){
+      const userId=req?.user?.id;
+        validateAccess(userId,deletedPost?.createdBy?.toString(),res)
+        const allPost: IPost[] = await Post.find()
+        res.status(200).json({
+          message: "Post deleted",
+          post: deletedPost,
+          posts: allPost,
+        })
+      }
+      else {
+        res.status(400).json({
+              error: "post is not found",
+        });
+      }
     } catch (error) {
       res.status(400).json({
         error: "something went wrong",

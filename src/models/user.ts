@@ -1,7 +1,7 @@
 import { IUser } from "../types/user";
 import { model, Schema } from "mongoose";
 
-const userSchema: Schema = new Schema(
+export const userSchema: Schema = new Schema(
   {
     name: {
       type: String,
@@ -21,5 +21,11 @@ const userSchema: Schema = new Schema(
   },
   { timestamps: true }
 )
+export const userBodyObject = {
+  email: 'string',
+  password: 'string',
+  required: ['email','password']
+}
+
 
 export default model<IUser>("User", userSchema)

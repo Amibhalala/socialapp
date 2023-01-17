@@ -1,41 +1,55 @@
-import { Response, Request, NextFunction } from "express";
+import { Response, Request } from "express";
 import { IUser, UserField } from "../../types/user";
 import User from "../../models/user";
+import redis from "../../utility/redis";
 var jwt = require('jsonwebtoken');
 var bcrypt = require('bcryptjs');
-let refreshTokenList:Array<any>=[];
+export const getCustomFilter= (query:any) =>{
+  let match:any={};
+  const {name,email}=query;
+  if(name){
+  match['name'] = { '$regex' : name, '$options' : 'i' }
+  }
+  if(email){
+    match['email'] = { '$regex' : email, '$options' : 'i' }
+  }
+  return match;
+};
 export const getAllUser = async (req: Request, res: Response): Promise<void> => {
   try {
     const query = req?.query;
+    const match=getCustomFilter(query);
     const pageOptions = {
       page : query?.page ? parseInt(query?.page) : 0,
       limit : query?.limit ? parseInt(query?.limit) : 0
     }
-    const users: UserField[] = await User.find({},{name:1,email:1}).limit(pageOptions.limit).skip(pageOptions.page * pageOptions.limit).sort({name:"asc"});
-    res.status(200).json({ users })
+    const users: UserField[] = await User.find({...match},{name:1,email:1}).limit(pageOptions.limit).skip(pageOptions.page * pageOptions.limit).sort({name:"asc"});
+    res.status(200).json({ users,page:query?.page,limit:query?.limit })
   } catch (error) {
     throw error
   }
 };
-const generateAccessToken = (email:string):any=>{
+const generateAccessToken = (id:string, email:string):any=>{
   if(email){
-    return jwt.sign({ email },String(process.env.ACCESS_TOKEN_SECRET), {
-      expiresIn: "60m"
+    return jwt.sign({ id,email },String(process.env.ACCESS_TOKEN_SECRET), {
+      expiresIn: String(process.env.ACCESS_TOKEN_EXPIRES_IN)
     });
   }
   throw new Error('Error creating token');
 };
-const generateRefreshToken = (email:string):any=>{
+const generateRefreshToken = async (id:string,email:string):Promise<any>=>{
+  try{
   if(email){
-    const refreshToken= jwt.sign({ email },String(process.env.REFRESH_TOKEN_SECRET), {
-      expiresIn: "60m"
+    const refreshToken= jwt.sign({ id,email },String(process.env.REFRESH_TOKEN_SECRET), {
+      expiresIn: String(process.env.REFRESH_TOKEN_EXPIRES_IN)
     });
-    refreshTokenList.push(refreshToken)
-    console.log('rr',refreshTokenList)
-
+    await redis.set(id.toString(),refreshToken)
     return refreshToken;
   }
+}
+catch(error){
   throw new Error('Error creating token');
+}
 };
 export const registerUser = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -53,7 +67,6 @@ export const registerUser = async (req: Request, res: Response): Promise<void> =
       password : encryptedPassword
     })
     const newUser: IUser = await user.save()
-    console.log('lol newUser',newUser)
    
     res.status(200).send({ auth: true, id: newUser._id,email:body.email });
   } catch (error) {
@@ -63,44 +76,16 @@ export const registerUser = async (req: Request, res: Response): Promise<void> =
     throw error
   }
 };
-    
-export const validateToken =  async (req: Request, res: Response, next:NextFunction): Promise<void> => {
-  try {
-    const authHeader = req.headers["authorization"]
-    const token = authHeader?.split(" ")[1];
-    if (token == null) {
-      res.sendStatus(400).send("No Token present in header")
-    }
-    else {
-      jwt.verify(token, String(process.env.ACCESS_TOKEN_SECRET), (error, user) => {
-        if (error) { 
-         res.status(403).send("Invalid token")
-         }
-         else {
-           req.user = user
-           next();
-         }
-        }) 
-    }
-  }
-  catch (error) {
-    res.status(400).json({
-      error: "something went wrong",
-    });
-    throw error
-  }
-
-}
 
 export const login = async (req: Request, res: Response): Promise<void> => {
   try {
     const body = req.body as Pick<IUser, "email" | "password">
     const user=await User.findOne({ email:body.email });
-    console.log('88',user)
+
     const isValidPassword= user ? await bcrypt.compare(body.password, user.password): false
     if(user && isValidPassword){
-      var accessToken = generateAccessToken(body.email);
-      var refreshToken = generateRefreshToken(body.email);
+      var accessToken = generateAccessToken(user._id, body.email);
+      var refreshToken = await generateRefreshToken(user._id,body.email);
       res.json ({accessToken: accessToken, refreshToken: refreshToken})
     }
     else {
@@ -120,15 +105,23 @@ export const login = async (req: Request, res: Response): Promise<void> => {
  
   export const refreshToken = async (req: Request, res: Response): Promise<void> => {
     try {
-      if(!refreshTokenList?.includes(req.body.token)){
+      const {token,email,id}=req?.body;
+      if(!token || !email || !id){
+        res.status(400).json({
+          error: "Body paremeters are required",
+        });
+      }
+      const refreshToken=await redis.get(id)
+      if(!refreshToken){
         res.status(400).json({
           error: "Refresh token is invalid",
         });
+        return;
       }
-      refreshTokenList=refreshTokenList.filter((token)=> token !=req.body.token);
-        var accessToken = generateAccessToken(req.body.email);
-        var refreshToken = generateRefreshToken(req.body.email);
-        res.json ({accessToken: accessToken, refreshToken: refreshToken})
+      const accessToken = generateAccessToken(id,email);
+      const newRefreshToken = await generateRefreshToken(id,email);
+      await redis.set(id.toString(), JSON.stringify(newRefreshToken))
+        res.json ({accessToken, refreshToken:newRefreshToken})
       
     } catch (error) {
       res.status(400).json({
@@ -138,4 +131,33 @@ export const login = async (req: Request, res: Response): Promise<void> => {
     }
   };
   
+export const logout = async (req: Request, res: Response): Promise<void> => {
+    try {
+      const authHeader = req?.headers?.["authorization"]
+      const authToken = authHeader?.split(" ")[1];
+      const {id}=req?.body;
+      if(!id){
+        res.status(400).json({
+          error: "Body paremeters are required",
+        });
+      }
+      const refreshToken=await redis.get(id.toString());
+      if(authToken && refreshToken){
+        await redis.set(id.toString(),null);
+        res.status(200).json({
+          message: "Logout successfully",
+        });
+      }
+      else {
+        res.status(400).json({
+          message: "Error in logging out",
+        });
+      }
+    } catch (error) {
+      res.status(400).json({
+        error: "something went wrong",
+      });
+      throw error
+    }
+  };
   
